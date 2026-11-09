@@ -1,0 +1,271 @@
+name: Build PocketPlayer IPA
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: macos-15
+    timeout-minutes: 40
+    steps:
+      - name: Install build tools
+        run: |
+          brew install xcodegen
+          if ! command -v pod >/dev/null; then
+            brew install cocoapods
+          fi
+
+      - name: Generate player project
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p Sources
+          cat > Sources/App.m <<'APP_SOURCE'
+          #import <UIKit/UIKit.h>
+          #import <UniformTypeIdentifiers/UniformTypeIdentifiers.h>
+          #import <AVFoundation/AVFoundation.h>
+          #import <MobileVLCKit/MobileVLCKit.h>
+          
+          @interface PlayerViewController : UIViewController <UIDocumentPickerDelegate>
+          @property(nonatomic, strong) VLCMediaPlayer *player;
+          @property(nonatomic, strong) UIView *video;
+          @property(nonatomic, strong) UILabel *titleLabel;
+          @property(nonatomic, strong) UILabel *statusLabel;
+          @property(nonatomic, strong) UIButton *playButton;
+          @property(nonatomic, strong) UISlider *seek;
+          @property(nonatomic, strong) NSURL *videoURL;
+          @property(nonatomic, strong) NSTimer *timer;
+          @end
+          
+          @implementation PlayerViewController
+          
+          - (UIButton *)button:(NSString *)title action:(SEL)action {
+              UIButton *button = [UIButton buttonWithType:UIButtonTypeSystem];
+              UIButtonConfiguration *config = [UIButtonConfiguration filledButtonConfiguration];
+              config.title = title;
+              config.cornerStyle = UIButtonConfigurationCornerStyleMedium;
+              button.configuration = config;
+              [button addTarget:self action:action forControlEvents:UIControlEventTouchUpInside];
+              [button.heightAnchor constraintGreaterThanOrEqualToConstant:44].active = YES;
+              return button;
+          }
+          
+          - (void)viewDidLoad {
+              [super viewDidLoad];
+              self.view.backgroundColor = UIColor.systemBackgroundColor;
+              self.player = [VLCMediaPlayer new];
+          
+              self.titleLabel = [UILabel new];
+              self.titleLabel.text = @"å£è¢æ­æ¾å¨";
+              self.titleLabel.font = [UIFont preferredFontForTextStyle:UIFontTextStyleHeadline];
+              self.titleLabel.lineBreakMode = NSLineBreakByTruncatingMiddle;
+          
+              self.video = [UIView new];
+              self.video.backgroundColor = UIColor.blackColor;
+              self.video.clipsToBounds = YES;
+              self.video.layer.cornerRadius = 12;
+              self.player.drawable = self.video;
+          
+              self.seek = [UISlider new];
+              self.seek.minimumValue = 0;
+              self.seek.maximumValue = 1;
+              self.seek.enabled = NO;
+              self.seek.accessibilityLabel = @"æ­æ¾è¿åº¦";
+              [self.seek addTarget:self action:@selector(seekVideo)
+                 forControlEvents:UIControlEventTouchUpInside | UIControlEventTouchUpOutside];
+          
+              self.playButton = [self button:@"æ­æ¾" action:@selector(togglePlayback)];
+              self.playButton.enabled = NO;
+              UIButton *open = [self button:@"æå¼è§é¢" action:@selector(openVideo)];
+              UIStackView *buttons = [[UIStackView alloc] initWithArrangedSubviews:@[open, self.playButton]];
+              buttons.spacing = 12;
+              buttons.distribution = UIStackViewDistributionFillEqually;
+          
+              self.statusLabel = [UILabel new];
+              self.statusLabel.font = [UIFont preferredFontForTextStyle:UIFontTextStyleFootnote];
+              self.statusLabel.textColor = UIColor.secondaryLabelColor;
+              self.statusLabel.numberOfLines = 2;
+              self.statusLabel.text = @"ä»ãæä»¶ãéæ©ä¸ä¸ªæ¬å°è§é¢";
+          
+              UIStackView *stack = [[UIStackView alloc] initWithArrangedSubviews:
+                  @[self.titleLabel, self.video, self.seek, buttons, self.statusLabel]];
+              stack.axis = UILayoutConstraintAxisVertical;
+              stack.spacing = 10;
+              stack.translatesAutoresizingMaskIntoConstraints = NO;
+              [self.view addSubview:stack];
+              [self.video setContentHuggingPriority:UILayoutPriorityDefaultLow
+                                            forAxis:UILayoutConstraintAxisVertical];
+              [NSLayoutConstraint activateConstraints:@[
+                  [stack.topAnchor constraintEqualToAnchor:self.view.safeAreaLayoutGuide.topAnchor constant:10],
+                  [stack.bottomAnchor constraintEqualToAnchor:self.view.safeAreaLayoutGuide.bottomAnchor constant:-10],
+                  [stack.leadingAnchor constraintEqualToAnchor:self.view.safeAreaLayoutGuide.leadingAnchor constant:16],
+                  [stack.trailingAnchor constraintEqualToAnchor:self.view.safeAreaLayoutGuide.trailingAnchor constant:-16]
+              ]];
+          
+              [AVAudioSession.sharedInstance setCategory:AVAudioSessionCategoryPlayback error:nil];
+              __weak typeof(self) weakSelf = self;
+              self.timer = [NSTimer timerWithTimeInterval:0.25 repeats:YES block:^(NSTimer *timer) {
+                  if (weakSelf) [weakSelf refreshControls];
+                  else [timer invalidate];
+              }];
+              [NSRunLoop.mainRunLoop addTimer:self.timer forMode:NSRunLoopCommonModes];
+          }
+          
+          - (void)openVideo {
+              UIDocumentPickerViewController *picker =
+                  [[UIDocumentPickerViewController alloc] initForOpeningContentTypes:@[UTTypeItem] asCopy:YES];
+              picker.delegate = self;
+              [self presentViewController:picker animated:YES completion:nil];
+          }
+          
+          - (void)documentPicker:(UIDocumentPickerViewController *)controller
+           didPickDocumentsAtURLs:(NSArray<NSURL *> *)urls {
+              NSURL *url = urls.firstObject;
+              if (!url) return;
+              NSNumber *isDirectory = nil;
+              [url getResourceValue:&isDirectory forKey:NSURLIsDirectoryKey error:nil];
+              if (isDirectory.boolValue) {
+                  self.statusLabel.text = @"è¯·éæ©ä¸ä¸ªè§é¢æä»¶";
+                  return;
+              }
+              [self.player stop];
+              self.videoURL = url;
+              self.titleLabel.text = url.lastPathComponent;
+              self.seek.value = 0;
+              self.statusLabel.text = @"æ­£å¨æå¼â¦";
+              self.player.media = [VLCMedia mediaWithURL:self.videoURL];
+              [self.player play];
+          }
+          
+          - (void)togglePlayback {
+              if (!self.videoURL) return;
+              if (self.player.isPlaying) {
+                  [self.player pause];
+              } else {
+                  VLCMediaPlayerState state = self.player.state;
+                  if (state == VLCMediaPlayerStateEnded || state == VLCMediaPlayerStateError ||
+                      state == VLCMediaPlayerStateStopped) {
+                      self.player.media = [VLCMedia mediaWithURL:self.videoURL];
+                  }
+                  [self.player play];
+              }
+          }
+          
+          - (void)seekVideo {
+              if (self.player.isSeekable) self.player.position = self.seek.value;
+          }
+          
+          - (void)refreshControls {
+              if (!self.videoURL) return;
+              self.playButton.enabled = YES;
+              UIButtonConfiguration *config = self.playButton.configuration;
+              NSString *title = self.player.isPlaying ? @"æå" : @"æ­æ¾";
+              if (![config.title isEqualToString:title]) {
+                  config.title = title;
+                  self.playButton.configuration = config;
+              }
+              self.seek.enabled = self.player.isSeekable;
+              if (!self.seek.tracking) {
+                  float position = self.player.position;
+                  self.seek.value = (position >= 0 && position <= 1) ? position : 0;
+              }
+              switch (self.player.state) {
+                  case VLCMediaPlayerStateError: self.statusLabel.text = @"æ æ³æ­æ¾è¿ä¸ªæä»¶ãè¯·å°è¯å¦ä¸æ®µè§é¢ã"; break;
+                  case VLCMediaPlayerStatePlaying: self.statusLabel.text = @"æ­£å¨æ­æ¾"; break;
+                  case VLCMediaPlayerStatePaused: self.statusLabel.text = @"å·²æå"; break;
+                  case VLCMediaPlayerStateEnded: self.statusLabel.text = @"æ­æ¾å®æ¯"; break;
+                  case VLCMediaPlayerStateOpening:
+                  case VLCMediaPlayerStateBuffering: self.statusLabel.text = @"æ­£å¨è¯»åâ¦"; break;
+                  default: self.statusLabel.text = @"å·²éæ©è§é¢"; break;
+              }
+          }
+          
+          - (void)dealloc {
+              [_timer invalidate];
+              [_player stop];
+              _player.drawable = nil;
+          }
+          @end
+          
+          @interface AppDelegate : UIResponder <UIApplicationDelegate>
+          @property(nonatomic, strong) UIWindow *window;
+          @end
+          
+          @implementation AppDelegate
+          - (BOOL)application:(UIApplication *)application didFinishLaunchingWithOptions:(NSDictionary *)options {
+              self.window = [[UIWindow alloc] initWithFrame:UIScreen.mainScreen.bounds];
+              self.window.rootViewController = [PlayerViewController new];
+              [self.window makeKeyAndVisible];
+              return YES;
+          }
+          @end
+          
+          int main(int argc, char *argv[]) {
+              @autoreleasepool {
+                  return UIApplicationMain(argc, argv, nil, NSStringFromClass(AppDelegate.class));
+              }
+          }
+          APP_SOURCE
+          cat > project.yml <<'PROJECT_SPEC'
+          name: PocketPlayer
+          options:
+            deploymentTarget:
+              iOS: "16.0"
+          targets:
+            PocketPlayer:
+              type: application
+              platform: iOS
+              sources:
+                - Sources
+              info:
+                path: AppInfo.plist
+                properties:
+                  CFBundleDisplayName: å£è¢æ­æ¾å¨
+                  CFBundleShortVersionString: "1.0"
+                  CFBundleVersion: "1"
+                  UILaunchScreen: {}
+                  UISupportedInterfaceOrientations:
+                    - UIInterfaceOrientationPortrait
+                    - UIInterfaceOrientationLandscapeLeft
+                    - UIInterfaceOrientationLandscapeRight
+              settings:
+                base:
+                  PRODUCT_BUNDLE_IDENTIFIER: com.yone.pocketplayer
+                  TARGETED_DEVICE_FAMILY: "1"
+                  CLANG_ENABLE_OBJC_ARC: YES
+          PROJECT_SPEC
+          cat > Podfile <<'PODS'
+          platform :ios, '16.0'
+          project 'PocketPlayer.xcodeproj'
+          
+          target 'PocketPlayer' do
+            pod 'MobileVLCKit', '3.6.0'
+          end
+          PODS
+          xcodegen generate
+          pod install
+
+      - name: Build and package unsigned IPA
+        shell: bash
+        run: |
+          set -euo pipefail
+          xcodebuild -workspace PocketPlayer.xcworkspace -scheme PocketPlayer \
+            -configuration Release -sdk iphoneos -destination 'generic/platform=iOS' \
+            -derivedDataPath build CODE_SIGNING_ALLOWED=NO build
+          app_path="build/Build/Products/Release-iphoneos/PocketPlayer.app"
+          test -x "$app_path/PocketPlayer"
+          xcrun lipo -verify_arch arm64 "$app_path/PocketPlayer"
+          mkdir -p export/Payload
+          ditto "$app_path" export/Payload/PocketPlayer.app
+          (cd export && zip -q -r PocketPlayer-unsigned.ipa Payload)
+          unzip -tq export/PocketPlayer-unsigned.ipa
+
+      - name: Upload IPA
+        uses: actions/upload-artifact@v4
+        with:
+          name: PocketPlayer-IPA
+          path: export/PocketPlayer-unsigned.ipa
+          if-no-files-found: error
